@@ -122,48 +122,40 @@ function searchDBHC(keyword) {
 }
 
 /* =====================
-   SEARCH KHÁC (TỐI ƯU HÓA CHO KBNN)
+   SEARCH KHÁC (TỐI ƯU HÓA KBNN & NGÂN HÀNG)
 ===================== */
 function searchNormal(keyword) {
     const q = normalize(keyword);
-    // Tách từ khóa và loại bỏ các khoảng trắng thừa
-    const keys = q.split(" ").filter(k => k.trim() !== ""); 
+    const keys = q.split(" ").filter(k => k.trim() !== "");
 
     let results = [];
 
     for (let line of rawData) {
         const n = normalize(line);
+
+        // 1. ĐIỀU KIỆN BẮT BUỘC: Phải chứa TẤT CẢ từ khóa (Strict AND)
+        // Nếu chỉ cần thiếu 1 từ khóa, bỏ qua dòng này luôn (không hiển thị)
+        const isMatchAll = keys.every(k => n.includes(k));
+        if (!isMatchAll) continue; 
+
+        // 2. Tính điểm cho các kết quả đã lọt qua bộ lọc để xếp hạng
         let score = 0;
-        let matchCount = 0;
 
-        // 1. Chứa y xì đúc nguyên cụm (Ví dụ gõ "Kho bạc")
-        if (n.includes(q)) score += 1000;
+        if (n.includes(q)) score += 1000; // Khớp y xì đúc nguyên cụm gõ vào
 
-        // 2. Tính điểm cho từng từ khóa rời rạc
         keys.forEach(k => {
-            if (n.includes(k)) {
-                score += 20; 
-                matchCount++;
-
-                // 3. Kiểm tra xem từ khóa có đứng độc lập không (để phân biệt "6" và "16")
-                // Bằng cách thêm khoảng trắng vào 2 đầu chuỗi để so sánh
-                const paddedN = " " + n + " ";
-                const paddedK = " " + k + " ";
-                if (paddedN.includes(paddedK)) {
-                    score += 50; // Thưởng thêm vì khớp trọn vẹn 1 chữ/số
-                }
+            const paddedN = " " + n + " ";
+            const paddedK = " " + k + " ";
+            
+            // Khớp trọn vẹn 1 chữ/số đứng độc lập
+            if (paddedN.includes(paddedK)) {
+                score += 50; 
+            } else {
+                score += 20; // Khớp một phần
             }
         });
 
-        // 4. Nếu chứa TẤT CẢ các từ khóa gõ vào -> Thưởng điểm cực lớn
-        if (matchCount === keys.length) {
-            score += 500;
-        }
-
-        // Chỉ đưa vào mảng kết quả nếu có điểm
-        if (score > 0) {
-            results.push({ line, score });
-        }
+        results.push({ line, score });
     }
 
     // Sắp xếp điểm từ cao xuống thấp
@@ -174,7 +166,7 @@ function searchNormal(keyword) {
 }
 
 /* =====================
-   INPUT SEARCH
+   INPUT SEARCH & HIGHLIGHT
 ===================== */
 input.addEventListener("input", () => {
 
@@ -193,7 +185,8 @@ input.addEventListener("input", () => {
 
     lastResult = results;
 
-    const keys = normalize(keyword).split(" ");
+    // Lấy từ khóa gốc (còn nguyên dấu tiếng Việt) để highlight chính xác hơn
+    const highlightKeys = keyword.split(" ").filter(k => k.trim() !== "");
 
     results.forEach(obj => {
 
@@ -201,12 +194,13 @@ input.addEventListener("input", () => {
         const tr = document.createElement("tr");
 
         cols.forEach(col => {
-
             let html = col;
 
-            keys.forEach(k => {
-                if (k.length > 1) {
-                    const reg = new RegExp(`(${k})`, "gi");
+            highlightKeys.forEach(k => {
+                if (k.length > 0) {
+                    // Escape các ký tự đặc biệt để tránh lỗi Regex
+                    const safeK = k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                    const reg = new RegExp(`(${safeK})`, "gi");
                     html = html.replace(reg, "<mark>$1</mark>");
                 }
             });

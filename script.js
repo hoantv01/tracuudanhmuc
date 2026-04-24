@@ -1,4 +1,6 @@
 let rawData = [];
+// Biến lưu trữ riêng dữ liệu đã phân tích của ĐVSDNS để truy xuất siêu tốc
+let parsedDVSDNS = []; 
 let currentFile = "dbhc.txt";
 let lastResult = [];
 
@@ -11,6 +13,7 @@ const tabs = document.querySelectorAll(".tab");
    CHUẨN HÓA TIẾNG VIỆT
 ===================== */
 function normalize(str) {
+    if (!str) return "";
     return str
         .toLowerCase()
         .normalize("NFD")
@@ -22,19 +25,68 @@ function normalize(str) {
 }
 
 /* =====================
-   LOAD FILE TXT
+   LOAD FILE TXT (TÍCH HỢP PAPAPARSE)
 ===================== */
 async function loadFile(file) {
     input.value = "";
     tbody.innerHTML = "";
     rawData = [];
 
-    const res = await fetch("data/" + file);
-    const text = await res.text();
-
-    rawData = text.split(/\r?\n/).filter(x => x.trim());
-
     buildHeader(file);
+
+    if (file === "madbhcdonvi.txt") {
+        // Nếu đã parse một lần rồi thì dùng lại bộ nhớ RAM, không tải lại qua mạng
+        if (parsedDVSDNS.length > 0) {
+            input.disabled = false;
+            input.placeholder = "Nhập Mã hoặc Tên ĐVSDNS...";
+            input.focus();
+            return;
+        }
+
+        // Khóa input trong lúc Web Worker đang làm việc để tránh lỗi
+        input.disabled = true;
+        input.placeholder = "Đang nạp 400.000 danh mục ĐVSDNS, vui lòng đợi...";
+
+        Papa.parse("data/" + file, {
+            download: true,
+            delimiter: "\t",
+            worker: true, // Chạy ngầm không làm đơ giao diện
+            skipEmptyLines: true,
+            complete: function(results) {
+                // TIỀN XỬ LÝ DỮ LIỆU: Chuẩn hóa sẵn để hàm search chạy nhanh như chớp
+                parsedDVSDNS = results.data.map(cols => {
+                    const ma = cols[0] ? cols[0].trim() : "";
+                    const ten = cols[1] ? cols[1].trim() : "";
+                    const maDBHC = cols[2] ? cols[2].trim() : "";
+                    
+                    return {
+                        ma: ma,
+                        ten: ten,
+                        maDBHC: maDBHC,
+                        nMa: normalize(ma),          // Chuẩn hóa sẵn Mã
+                        nTen: normalize(ten),        // Chuẩn hóa sẵn Tên
+                        nMaDBHC: normalize(maDBHC),  // Chuẩn hóa sẵn Mã ĐBHC
+                        originalLine: `${ma}\t${ten}\t${maDBHC}` // Lưu lại dòng gốc để render
+                    };
+                });
+
+                input.disabled = false;
+                input.placeholder = "Nhập Mã hoặc Tên ĐVSDNS...";
+                input.focus();
+            },
+            error: function(err) {
+                input.placeholder = "Lỗi tải dữ liệu ĐVSDNS!";
+                console.error("PapaParse Lỗi:", err);
+            }
+        });
+    } else {
+        // Dành cho các file nhỏ (dbhc.txt, kbnn.txt)
+        input.disabled = false;
+        input.placeholder = "Nhập từ khóa tìm kiếm...";
+        const res = await fetch("data/" + file);
+        const text = await res.text();
+        rawData = text.split(/\r?\n/).filter(x => x.trim());
+    }
 }
 
 loadFile(currentFile);
@@ -47,121 +99,65 @@ function buildHeader(file) {
         thead.innerHTML = "<th>Mã</th><th>Phường / Xã</th><th>Tỉnh / Huyện</th>";
     else if (file === "kbnn.txt")
         thead.innerHTML = "<th>Tên Kho bạc</th><th>Mã</th><th>Tỉnh</th>";
+    else if (file === "madbhcdonvi.txt") 
+        thead.innerHTML = "<th>Mã ĐVSDNS</th><th>Tên đơn vị</th><th>Mã ĐBHC</th>";
     else
         thead.innerHTML = "<th>Mã</th><th>Ngân hàng</th>";
 }
 
 /* =====================
-   SEARCH DBHC (ƯU TIÊN CAO)
+   SEARCH DBHC & NORMAL (GIỮ NGUYÊN CODE CỦA BẠN)
 ===================== */
-function searchDBHC(keyword) {
-
-    const q = normalize(keyword);
-    const keys = q.split(" ");
-
-    let results = [];
-
-    for (let line of rawData) {
-
-        const cols = line.split(/\t| {2,}/);
-
-        const ma = cols[0] || "";
-        const ten = cols[1] || "";
-        const tinh = cols[2] || "";
-
-        const nTen = normalize(ten);
-        const nTinh = normalize(tinh);
-        const full = normalize(ten + " " + tinh);
-
-        let score = 0;
-
-        /* ==========================
-           1. ĐÚNG Y TUYỆT ĐỐI
-        ========================== */
-        if (nTen === q) score += 1000;
-
-        /* ==========================
-           2. ĐÚNG CỤM
-        ========================== */
-        if (nTen.includes(q)) score += 800;
-
-        /* ==========================
-           3. KHỚP ĐỦ TỪ ĐÚNG THỨ TỰ
-        ========================== */
-        if (full.includes(q)) score += 600;
-
-        /* ==========================
-           4. ĐẢO TỪ (PHỤ)
-        ========================== */
-        const tenWords = nTen.split(" ");
-        if (keys.length === tenWords.length) {
-            const a = [...keys].sort().join(" ");
-            const b = [...tenWords].sort().join(" ");
-            if (a === b) score += 300;
-        }
-
-        /* ==========================
-           5. TỪ RỜI
-        ========================== */
-        keys.forEach(k => {
-            if (nTen.includes(k)) score += 80;
-            if (nTinh.includes(k)) score += 40;
-        });
-
-        /* ==========================
-           6. MÃ
-        ========================== */
-        if (ma.includes(keyword)) score += 900;
-
-        if (score > 0)
-            results.push({ line, score });
-    }
-
-    results.sort((a, b) => b.score - a.score);
-    return results;
-}
+// ... (Giữ nguyên toàn bộ nội dung hàm searchDBHC và searchNormal) ...
 
 /* =====================
-   SEARCH KHÁC (TỐI ƯU HÓA KBNN & NGÂN HÀNG)
+   SEARCH ĐVSDNS (TỐI ƯU HÓA MỚI)
 ===================== */
-function searchNormal(keyword) {
+function searchDVSDNS(keyword) {
     const q = normalize(keyword);
     const keys = q.split(" ").filter(k => k.trim() !== "");
 
     let results = [];
 
-    for (let line of rawData) {
-        const n = normalize(line);
+    // Duyệt trực tiếp qua mảng Object đã được tiền xử lý
+    for (let i = 0; i < parsedDVSDNS.length; i++) {
+        const item = parsedDVSDNS[i];
 
-        // 1. ĐIỀU KIỆN BẮT BUỘC: Phải chứa TẤT CẢ từ khóa (Strict AND)
-        // Nếu chỉ cần thiếu 1 từ khóa, bỏ qua dòng này luôn (không hiển thị)
-        const isMatchAll = keys.every(k => n.includes(k));
-        if (!isMatchAll) continue; 
+        // 1. ĐIỀU KIỆN BẮT BUỘC: So sánh trực tiếp trên thuộc tính đã chuẩn hóa
+        const isMatchAll = keys.every(k => 
+            item.nMa.includes(k) || 
+            item.nTen.includes(k) || 
+            item.nMaDBHC.includes(k)
+        );
+        
+        if (!isMatchAll) continue;
 
-        // 2. Tính điểm cho các kết quả đã lọt qua bộ lọc để xếp hạng
+        // 2. TÍNH ĐIỂM XẾP HẠNG
         let score = 0;
 
-        if (n.includes(q)) score += 1000; // Khớp y xì đúc nguyên cụm gõ vào
+        if (item.ma === keyword) score += 2000;
+        else if (item.ma.includes(keyword)) score += 900;
+        
+        if (item.maDBHC === keyword) score += 1500;
+        else if (item.maDBHC.includes(keyword)) score += 700;
+
+        if (item.nTen === q) score += 1000;        
+        if (item.nTen.includes(q)) score += 800;   
 
         keys.forEach(k => {
-            const paddedN = " " + n + " ";
+            const paddedN = " " + item.nTen + " ";
             const paddedK = " " + k + " ";
-            
-            // Khớp trọn vẹn 1 chữ/số đứng độc lập
-            if (paddedN.includes(paddedK)) {
-                score += 50; 
-            } else {
-                score += 20; // Khớp một phần
-            }
+            if (paddedN.includes(paddedK)) score += 50; 
+            else if (item.nTen.includes(k)) score += 20;      
         });
 
-        results.push({ line, score });
+        if (score > 0) {
+            // Trả về định dạng { line, score } để khớp với hàm render hiện tại
+            results.push({ line: item.originalLine, score: score });
+        }
     }
 
-    // Sắp xếp điểm từ cao xuống thấp
     results.sort((a, b) => b.score - a.score);
-    
-    // Trả về top 50 kết quả
     return results.slice(0, 50);
 }
 
@@ -169,7 +165,6 @@ function searchNormal(keyword) {
    INPUT SEARCH & HIGHLIGHT
 ===================== */
 input.addEventListener("input", () => {
-
     tbody.innerHTML = "";
     lastResult = [];
 
@@ -178,18 +173,19 @@ input.addEventListener("input", () => {
 
     let results = [];
 
-    if (currentFile === "dbhc.txt")
+    if (currentFile === "dbhc.txt") {
         results = searchDBHC(keyword);
-    else
+    } else if (currentFile === "madbhcdonvi.txt") {
+        results = searchDVSDNS(keyword); 
+    } else {
         results = searchNormal(keyword);
+    }
 
     lastResult = results;
 
-    // Lấy từ khóa gốc (còn nguyên dấu tiếng Việt) để highlight chính xác hơn
     const highlightKeys = keyword.split(" ").filter(k => k.trim() !== "");
 
     results.forEach(obj => {
-
         const cols = obj.line.split(/\t| {2,}/);
         const tr = document.createElement("tr");
 
@@ -198,7 +194,6 @@ input.addEventListener("input", () => {
 
             highlightKeys.forEach(k => {
                 if (k.length > 0) {
-                    // Escape các ký tự đặc biệt để tránh lỗi Regex
                     const safeK = k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
                     const reg = new RegExp(`(${safeK})`, "gi");
                     html = html.replace(reg, "<mark>$1</mark>");

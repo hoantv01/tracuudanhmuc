@@ -1,23 +1,26 @@
 /* =========================================
-   CÁC BIẾN TOÀN CỤC & TRẠNG THÁI HỆ THỐNG
+   CÁC BIẾN TOÀN CỤC & QUẢN LÝ PHIÊN BẢN
 ========================================= */
+// QUAN TRỌNG: Khi bạn cập nhật file madbhcdonvi.txt trên GitHub, 
+// hãy tăng số này lên (ví dụ: 2, 3, 4...) để máy người dùng tự động tải file mới.
+const DATA_VERSION = 1; 
+
 let rawData = [];
 let parsedDVSDNS = []; 
 let currentFile = "dbhc.txt";
 let lastResult = [];
 
-// Trạng thái tải ngầm cho file dung lượng lớn
+// Trạng thái hệ thống
 let isDVSDNSReady = false;
 let isDVSDNSLoading = false;
 
-// Các phần tử DOM
 const input = document.getElementById("searchInput");
 const tbody = document.getElementById("results");
 const thead = document.getElementById("table-head");
 const tabs = document.querySelectorAll(".tab");
 
 /* =========================================
-   1. HÀM CHUẨN HÓA TIẾNG VIỆT (TỐI ƯU)
+   1. CHUẨN HÓA TIẾNG VIỆT
 ========================================= */
 function normalize(str) {
     if (!str) return "";
@@ -32,56 +35,130 @@ function normalize(str) {
 }
 
 /* =========================================
-   2. TẢI NGẦM DỮ LIỆU ĐVSDNS (>400K DÒNG)
+   2. HỆ QUẢN TRỊ CƠ SỞ DỮ LIỆU INDEXEDDB
 ========================================= */
-function preloadDVSDNS() {
-    if (isDVSDNSLoading || isDVSDNSReady) return;
-    isDVSDNSLoading = true;
+const DB_NAME = "KBNN_Lookup_DB";
+const STORE_NAME = "DVSDNS_Store";
 
-    // Sử dụng PapaParse đọc ngầm file thông qua Web Worker
-    Papa.parse("data/madbhcdonvi.txt", {
-        download: true,
-        delimiter: "\t",
-        worker: true, // Không làm treo giao diện trình duyệt
-        skipEmptyLines: true,
-        complete: function(results) {
-            // Tiền xử lý: Chỉ chuẩn hóa tên 1 lần duy nhất để tìm kiếm siêu tốc
-            parsedDVSDNS = results.data.map(cols => {
-                const ma = cols[0] ? cols[0].trim().toLowerCase() : "";
-                const ten = cols[1] ? cols[1].trim() : "";
-                const maDBHC = cols[2] ? cols[2].trim().toLowerCase() : "";
-                
-                return {
-                    ma: ma,                 // Mã số không cần cắt dấu tiếng Việt
-                    maDBHC: maDBHC,         // Mã ĐBHC không cần cắt dấu tiếng Việt
-                    nTen: normalize(ten),   // Chỉ chuẩn hóa cột Tên
-                    originalLine: `${cols[0] || ""}\t${cols[1] || ""}\t${cols[2] || ""}`
-                };
-            });
+function openDB() {
+    return new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, DATA_VERSION);
 
-            isDVSDNSReady = true;
-            
-            // Nếu người dùng đang đứng ở tab ĐVSDNS và đang đợi, mở khóa input ngay
-            if (currentFile === "madbhcdonvi.txt") {
-                input.disabled = false;
-                input.placeholder = "Nhập Mã hoặc Tên ĐVSDNS để tra cứu...";
-                input.focus();
+        request.onupgradeneeded = (event) => {
+            const db = event.target.result;
+            // Nếu có phiên bản mới, xóa kho cũ đi tạo lại
+            if (db.objectStoreNames.contains(STORE_NAME)) {
+                db.deleteObjectStore(STORE_NAME);
             }
-        },
-        error: function(err) {
-            console.error("Lỗi tải ngầm ĐVSDNS:", err);
-            if (currentFile === "madbhcdonvi.txt") {
-                input.placeholder = "Lỗi tải dữ liệu. Vui lòng tải lại trang (F5).";
-            }
-        }
+            db.createObjectStore(STORE_NAME);
+        };
+
+        request.onsuccess = (event) => resolve(event.target.result);
+        request.onerror = (event) => reject(event.target.error);
     });
 }
 
-// KÍCH HOẠT TẢI NGẦM NGAY KHI VỪA MỞ TRANG WEB
+function saveToDB(data) {
+    return openDB().then(db => {
+        return new Promise((resolve, reject) => {
+            const transaction = db.transaction(STORE_NAME, "readwrite");
+            const store = transaction.objectStore(STORE_NAME);
+            store.put(data, "parsedDataKey");
+            transaction.oncomplete = () => resolve();
+            transaction.onerror = (e) => reject(e.target.error);
+        });
+    });
+}
+
+function loadFromDB() {
+    return openDB().then(db => {
+        return new Promise((resolve, reject) => {
+            const transaction = db.transaction(STORE_NAME, "readonly");
+            const store = transaction.objectStore(STORE_NAME);
+            const request = store.get("parsedDataKey");
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = (e) => reject(e.target.error);
+        });
+    });
+}
+
+/* =========================================
+   3. TẢI NGẦM DỮ LIỆU ĐVSDNS THÔNG MINH
+========================================= */
+async function preloadDVSDNS() {
+    if (isDVSDNSLoading || isDVSDNSReady) return;
+    isDVSDNSLoading = true;
+
+    try {
+        // BƯỚC 1: Tìm trong ổ đĩa ảo (IndexedDB) trước
+        const cachedData = await loadFromDB();
+        
+        if (cachedData && cachedData.length > 0) {
+            console.log("✅ Đã lấy dữ liệu từ IndexedDB (Không tốn mạng). Tốc độ 0.1s");
+            parsedDVSDNS = cachedData;
+            isDVSDNSReady = true;
+            unlockInputIfNeeded();
+            return;
+        }
+
+        // BƯỚC 2: Nếu chưa có (mới vào lần đầu hoặc mới update version), bắt đầu tải từ GitHub
+        console.log("⬇️ Không có sẵn cache. Bắt đầu kéo file 20MB từ máy chủ...");
+        Papa.parse("data/madbhcdonvi.txt", {
+            download: true,
+            delimiter: "\t",
+            worker: true,
+            skipEmptyLines: true,
+            complete: async function(results) {
+                // Tiền xử lý dữ liệu
+                parsedDVSDNS = results.data.map(cols => {
+                    const ma = cols[0] ? cols[0].trim().toLowerCase() : "";
+                    const ten = cols[1] ? cols[1].trim() : "";
+                    const maDBHC = cols[2] ? cols[2].trim().toLowerCase() : "";
+                    return {
+                        ma: ma,
+                        maDBHC: maDBHC,
+                        nTen: normalize(ten),
+                        originalLine: `${cols[0] || ""}\t${cols[1] || ""}\t${cols[2] || ""}`
+                    };
+                });
+
+                isDVSDNSReady = true;
+                unlockInputIfNeeded();
+
+                // Lưu vào IndexedDB để dùng cho các lần mở trình duyệt sau
+                try {
+                    await saveToDB(parsedDVSDNS);
+                    console.log("💾 Đã lưu 400.000 dòng vào IndexedDB trình duyệt thành công!");
+                } catch (dbErr) {
+                    console.error("Lỗi khi lưu vào IndexedDB: ", dbErr);
+                }
+            },
+            error: function(err) {
+                console.error("Lỗi tải PapaParse:", err);
+                if (currentFile === "madbhcdonvi.txt") {
+                    input.placeholder = "Lỗi tải dữ liệu. Vui lòng F5 tải lại trang.";
+                }
+            }
+        });
+    } catch (error) {
+        console.error("Lỗi hệ thống lưu trữ:", error);
+    }
+}
+
+// Mở khóa input nếu người dùng đang đứng ở tab ĐVSDNS chờ đợi
+function unlockInputIfNeeded() {
+    if (currentFile === "madbhcdonvi.txt") {
+        input.disabled = false;
+        input.placeholder = "Nhập Mã hoặc Tên ĐVSDNS để tra cứu...";
+        input.focus();
+    }
+}
+
+// KÍCH HOẠT QUY TRÌNH KHI MỞ WEB
 preloadDVSDNS();
 
 /* =========================================
-   3. XỬ LÝ CHUYỂN TAB VÀ TẢI FILE NHỎ
+   4. CHUYỂN TAB VÀ TẢI FILE NHỎ
 ========================================= */
 async function loadFile(file) {
     input.value = "";
@@ -92,22 +169,19 @@ async function loadFile(file) {
 
     if (file === "madbhcdonvi.txt") {
         if (isDVSDNSReady) {
-            // Đã tải ngầm xong -> Dùng được luôn
             input.disabled = false;
             input.placeholder = "Nhập Mã hoặc Tên ĐVSDNS để tra cứu...";
             input.focus();
         } else {
-            // Mạng chậm, chưa tải ngầm xong -> Khóa input bắt đợi
             input.disabled = true;
-            input.placeholder = "Hệ thống đang nạp danh mục ĐVSDNS, vui lòng đợi vài giây...";
+            input.placeholder = "Hệ thống đang nạp dữ liệu lần đầu (có thể mất vài giây)...";
         }
     } else {
-        // Xử lý các file txt nhỏ (dbhc, kbnn...)
         input.disabled = false;
         input.placeholder = "Nhập từ khóa tìm kiếm...";
         try {
             const res = await fetch("data/" + file);
-            if (!res.ok) throw new Error("Không tìm thấy file");
+            if (!res.ok) throw new Error("File not found");
             const text = await res.text();
             rawData = text.split(/\r?\n/).filter(x => x.trim());
         } catch (err) {
@@ -116,11 +190,10 @@ async function loadFile(file) {
     }
 }
 
-// Nạp file mặc định ban đầu
 loadFile(currentFile);
 
 /* =========================================
-   4. RENDER HEADER BẢNG KẾT QUẢ
+   5. RENDER HEADER BẢNG
 ========================================= */
 function buildHeader(file) {
     if (file === "dbhc.txt")
@@ -134,10 +207,8 @@ function buildHeader(file) {
 }
 
 /* =========================================
-   5. CÁC HÀM TRA CỨU
+   6. CÁC HÀM TRA CỨU
 ========================================= */
-
-// Tra cứu Địa bàn hành chính
 function searchDBHC(keyword) {
     const q = normalize(keyword);
     const keys = q.split(" ");
@@ -171,14 +242,12 @@ function searchDBHC(keyword) {
         });
 
         if (ma.includes(keyword)) score += 900;
-
         if (score > 0) results.push({ line, score });
     }
     results.sort((a, b) => b.score - a.score);
     return results;
 }
 
-// Tra cứu KBNN & Ngân hàng
 function searchNormal(keyword) {
     const q = normalize(keyword);
     const keys = q.split(" ").filter(k => k.trim() !== "");
@@ -204,14 +273,12 @@ function searchNormal(keyword) {
     return results.slice(0, 50);
 }
 
-// Tra cứu ĐVSDNS (ĐÃ TỐI ƯU CHO 400.000 DÒNG)
 function searchDVSDNS(keyword) {
     const q = normalize(keyword);
     const keys = q.split(" ").filter(k => k.trim() !== "");
     const qLower = keyword.trim().toLowerCase();
     let results = [];
 
-    // Duyệt qua mảng object đã được tiền xử lý ngầm ở bước 2
     for (let i = 0; i < parsedDVSDNS.length; i++) {
         const item = parsedDVSDNS[i];
 
@@ -251,7 +318,7 @@ function searchDVSDNS(keyword) {
 }
 
 /* =========================================
-   6. LẮNG NGHE SỰ KIỆN TÌM KIẾM VÀ RENDER
+   7. SỰ KIỆN TÌM KIẾM
 ========================================= */
 input.addEventListener("input", () => {
     tbody.innerHTML = "";
@@ -292,14 +359,11 @@ input.addEventListener("input", () => {
             tr.appendChild(td);
         });
 
-        // Click vào dòng để copy mã cột đầu tiên
         tr.onclick = () => {
             navigator.clipboard.writeText(cols[0])
-                .then(() => alert("Đã copy mã: " + cols[0]))
+                .then(() => alert("Đã copy: " + cols[0]))
                 .catch(err => console.error("Lỗi copy: ", err));
         };
-
-        // Hiệu ứng thay đổi con trỏ chuột khi hover
         tr.style.cursor = "pointer";
         
         tbody.appendChild(tr);
@@ -307,14 +371,12 @@ input.addEventListener("input", () => {
 });
 
 /* =========================================
-   7. SỰ KIỆN CHUYỂN TAB
+   8. SỰ KIỆN CHUYỂN TAB
 ========================================= */
 tabs.forEach(tab => {
     tab.onclick = () => {
         tabs.forEach(t => t.classList.remove("active"));
         tab.classList.add("active");
-        
-        // .trim() để ngăn ngừa lỗi gõ dư khoảng trắng trong HTML (data-file)
         currentFile = tab.dataset.file.trim(); 
         loadFile(currentFile);
     };
